@@ -16,7 +16,7 @@ using UnityEngine;
 namespace Oxide.Plugins
 {
     [Info("Safe Respawn", "VisEntities", "1.0.0")]
-    [Description(" ")]
+    [Description("Gives players temporary protection after spawning.")]
     public class SafeRespawn : RustPlugin
     {
         #region Fields
