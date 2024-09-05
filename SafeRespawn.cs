@@ -4,6 +4,7 @@
  * Full legal terms can be found at https://game4freak.io/eula/
  */
 
+using CompanionServer.Handlers;
 using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
@@ -15,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Safe Respawn", "VisEntities", "1.0.0")]
+    [Info("Safe Respawn", "VisEntities", "1.1.1")]
     [Description("Gives players temporary protection after spawning.")]
     public class SafeRespawn : RustPlugin
     {
@@ -47,6 +48,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Ignore Sleeping Bag Spawns")]
             public bool IgnoreSleepingBagSpawns { get; set; }
+
+            [JsonProperty("Reset Data On Wipe")]
+            public bool ResetDataOnWipe { get; set; }
         }
 
         protected override void LoadConfig()
@@ -79,6 +83,11 @@ namespace Oxide.Plugins
             if (string.Compare(_config.Version, "1.0.0") < 0)
                 _config = defaultConfig;
 
+            if (string.Compare(_config.Version, "1.1.0") < 0)
+            {
+                _config.ResetDataOnWipe = defaultConfig.ResetDataOnWipe;
+            }
+
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
         }
@@ -91,7 +100,8 @@ namespace Oxide.Plugins
                 ProtectionDurationSeconds = 60f,
                 EnableProtectionOnlyForFirstSpawn = true,
                 EnableProtectionAgainstNPC = true,
-                IgnoreSleepingBagSpawns = true
+                IgnoreSleepingBagSpawns = true,
+                ResetDataOnWipe = true
             };
         }
 
@@ -193,6 +203,12 @@ namespace Oxide.Plugins
             _plugin = null;
         }
 
+        private void OnNewSave()
+        {
+            if (_config.ResetDataOnWipe)
+                DataFileUtil.LoadOrCreate<StoredData>(DataFileUtil.GetFilePath());
+        }
+
         private void OnPlayerRespawned(BasePlayer player)
         {
             if (player == null || !PermissionUtil.HasPermission(player, PermissionUtil.USE))
@@ -263,7 +279,7 @@ namespace Oxide.Plugins
 
         private bool AnySleepingBagOrBedNearby(Vector3 position, float radius)
         {
-            List<SleepingBag> nearbySleepingBags = Pool.GetList<SleepingBag>();
+            List<SleepingBag> nearbySleepingBags = Pool.Get<List<SleepingBag>>();
             bool isNearSleepingBagOrBed = false;
 
             Vis.Entities(position, radius, nearbySleepingBags, LAYER_BEDS, QueryTriggerInteraction.Ignore);
@@ -277,7 +293,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            Pool.FreeList(ref nearbySleepingBags);
+            Pool.FreeUnmanaged(ref nearbySleepingBags);
             return isNearSleepingBagOrBed;
         }
 
