@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Safe Respawn", "VisEntities", "1.1.1")]
+    [Info("Safe Respawn", "VisEntities", "1.2.0")]
     [Description("Gives players temporary protection after spawning.")]
     public class SafeRespawn : RustPlugin
     {
@@ -42,6 +42,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Enable Protection Against NPC")]
             public bool EnableProtectionAgainstNPC { get; set; }
+
+            [JsonProperty("Enable Protection Against Animals")]
+            public bool EnableProtectionAgainstAnimals { get; set; }
 
             [JsonProperty("Enable Protection Only For First Spawn")]
             public bool EnableProtectionOnlyForFirstSpawn { get; set; }
@@ -88,6 +91,11 @@ namespace Oxide.Plugins
                 _config.ResetDataOnWipe = defaultConfig.ResetDataOnWipe;
             }
 
+            if (string.Compare(_config.Version, "1.2.0") < 0)
+            {
+                _config.EnableProtectionAgainstAnimals = defaultConfig.EnableProtectionAgainstAnimals;
+            }
+
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
         }
@@ -99,6 +107,7 @@ namespace Oxide.Plugins
                 Version = Version.ToString(),
                 ProtectionDurationSeconds = 60f,
                 EnableProtectionOnlyForFirstSpawn = true,
+                EnableProtectionAgainstAnimals = true,
                 EnableProtectionAgainstNPC = true,
                 IgnoreSleepingBagSpawns = true,
                 ResetDataOnWipe = true
@@ -244,8 +253,7 @@ namespace Oxide.Plugins
                 return null;
 
             BasePlayer attacker = hitInfo.InitiatorPlayer;
-            if (attacker == null)
-                return null;
+            BaseNpc animalAttacker = hitInfo.Initiator as BaseNpc;
 
             if (attacker == victim)
                 return null;
@@ -254,15 +262,18 @@ namespace Oxide.Plugins
             {
                 if (DateTime.Now < protectionEndTime)
                 {
-                    if (!_config.EnableProtectionAgainstNPC && attacker.IsNpc)
+                    if (!_config.EnableProtectionAgainstNPC && attacker != null && attacker.IsNpc)
                         return null;
 
-                    if (attacker.userID.IsSteamId())
+                    if (!_config.EnableProtectionAgainstAnimals && animalAttacker != null)
+                        return null;
+
+                    if (attacker != null && attacker.userID.IsSteamId())
                     {
                         TimeSpan remainingTime = protectionEndTime - DateTime.Now;
                         SendMessage(attacker, Lang.PlayerProtected, FormatTime(remainingTime));
                     }
-                  
+
                     hitInfo.damageTypes.Clear();
                     return true;
                 }
