@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Safe Respawn", "VisEntities", "1.2.0")]
+    [Info("Safe Respawn", "VisEntities", "1.3.0")]
     [Description("Gives players temporary protection after spawning.")]
     public class SafeRespawn : RustPlugin
     {
@@ -45,6 +45,15 @@ namespace Oxide.Plugins
 
             [JsonProperty("Enable Protection Against Animals")]
             public bool EnableProtectionAgainstAnimals { get; set; }
+
+            [JsonProperty("Enable Protection Against Patrol Helicopter")]
+            public bool EnableProtectionAgainstHelicopter { get; set; }
+
+            [JsonProperty("Protected Players Cannot Harm Others")]
+            public bool ProtectedPlayersCannotHarmOthers { get; set; }
+
+            [JsonProperty("Protect Owned Entities")]
+            public bool ProtectOwnedEntities { get; set; }
 
             [JsonProperty("Enable Protection Only For First Spawn")]
             public bool EnableProtectionOnlyForFirstSpawn { get; set; }
@@ -96,6 +105,13 @@ namespace Oxide.Plugins
                 _config.EnableProtectionAgainstAnimals = defaultConfig.EnableProtectionAgainstAnimals;
             }
 
+            if (string.Compare(_config.Version, "1.3.0") < 0)
+            {
+                _config.EnableProtectionAgainstHelicopter= defaultConfig.EnableProtectionAgainstHelicopter;
+                _config.ProtectedPlayersCannotHarmOthers= defaultConfig.ProtectedPlayersCannotHarmOthers;
+                _config.ProtectOwnedEntities = defaultConfig.ProtectOwnedEntities;
+            }
+
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
         }
@@ -109,83 +125,15 @@ namespace Oxide.Plugins
                 EnableProtectionOnlyForFirstSpawn = true,
                 EnableProtectionAgainstAnimals = true,
                 EnableProtectionAgainstNPC = true,
+                EnableProtectionAgainstHelicopter = true,
+                ProtectedPlayersCannotHarmOthers = true,
+                ProtectOwnedEntities = true,
                 IgnoreSleepingBagSpawns = true,
                 ResetDataOnWipe = true
             };
         }
 
         #endregion Configuration
-
-        #region Data Utility
-
-        public class DataFileUtil
-        {
-            private const string FOLDER = "";
-
-            public static string GetFilePath(string filename = null)
-            {
-                if (filename == null)
-                    filename = _plugin.Name;
-
-                return Path.Combine(FOLDER, filename);
-            }
-
-            public static string[] GetAllFilePaths()
-            {
-                string[] filePaths = Interface.Oxide.DataFileSystem.GetFiles(FOLDER);
-
-                for (int i = 0; i < filePaths.Length; i++)
-                {
-                    // Remove the redundant '.json' from the filepath. This is necessary because the filepaths are returned with a double '.json'.
-                    filePaths[i] = filePaths[i].Substring(0, filePaths[i].Length - 5);
-                }
-
-                return filePaths;
-            }
-
-            public static bool Exists(string filePath)
-            {
-                return Interface.Oxide.DataFileSystem.ExistsDatafile(filePath);
-            }
-
-            public static T Load<T>(string filePath) where T : class, new()
-            {
-                T data = Interface.Oxide.DataFileSystem.ReadObject<T>(filePath);
-                if (data == null)
-                    data = new T();
-
-                return data;
-            }
-
-            public static T LoadIfExists<T>(string filePath) where T : class, new()
-            {
-                if (Exists(filePath))
-                    return Load<T>(filePath);
-                else
-                    return null;
-            }
-
-            public static T LoadOrCreate<T>(string filePath) where T : class, new()
-            {
-                T data = LoadIfExists<T>(filePath);
-                if (data == null)
-                    data = new T();
-
-                return data;
-            }
-
-            public static void Save<T>(string filePath, T data)
-            {
-                Interface.Oxide.DataFileSystem.WriteObject<T>(filePath, data);
-            }
-
-            public static void Delete(string filePath)
-            {
-                Interface.Oxide.DataFileSystem.DeleteDataFile(filePath);
-            }
-        }
-
-        #endregion Data Utility
 
         #region Stored Data
 
@@ -247,38 +195,18 @@ namespace Oxide.Plugins
             }
         }
 
-        private object OnEntityTakeDamage(BasePlayer victim, HitInfo hitInfo)
+        private object OnEntityTakeDamage(BaseEntity hurtEntity, HitInfo hitInfo)
         {
-            if (victim == null || hitInfo == null)
+            if (hurtEntity == null || hitInfo == null)
                 return null;
 
-            BasePlayer attacker = hitInfo.InitiatorPlayer;
-            BaseNpc animalAttacker = hitInfo.Initiator as BaseNpc;
-
-            if (attacker == victim)
-                return null;
-
-            if (_playerProtectionEndTimes.TryGetValue(victim.userID, out DateTime protectionEndTime))
+            if (hurtEntity is BasePlayer victimPlayer)
             {
-                if (DateTime.Now < protectionEndTime)
-                {
-                    if (!_config.EnableProtectionAgainstNPC && attacker != null && attacker.IsNpc)
-                        return null;
-
-                    if (!_config.EnableProtectionAgainstAnimals && animalAttacker != null)
-                        return null;
-
-                    if (attacker != null && attacker.userID.IsSteamId())
-                    {
-                        TimeSpan remainingTime = protectionEndTime - DateTime.Now;
-                        SendMessage(attacker, Lang.PlayerProtected, FormatTime(remainingTime));
-                    }
-
-                    hitInfo.damageTypes.Clear();
-                    return true;
-                }
-                else
-                    _playerProtectionEndTimes.Remove(victim.userID);
+                return HandleDamageToPlayer(victimPlayer, hitInfo);
+            }
+            else if (hurtEntity is BaseEntity entity)
+            {
+                return HandleDamageToOwnedEntity(hurtEntity, hitInfo);
             }
 
             return null;
@@ -286,7 +214,98 @@ namespace Oxide.Plugins
 
         #endregion Oxide Hooks
 
-        #region Sleeping Bag and Bed Detection
+        #region Damage Handling
+
+        private object HandleDamageToPlayer(BasePlayer victim, HitInfo hitInfo)
+        {
+            if (victim == null || hitInfo == null)
+                return null;
+
+            BasePlayer attackerPlayer = hitInfo.InitiatorPlayer;
+            BaseNpc animalAttacker = hitInfo.Initiator as BaseNpc;
+            PatrolHelicopter heliAttacker = hitInfo.Initiator as PatrolHelicopter;
+
+            if (_playerProtectionEndTimes.TryGetValue(victim.userID, out DateTime victimProtectionEnd))
+            {
+                if (DateTime.Now < victimProtectionEnd)
+                {
+                    if (!_config.EnableProtectionAgainstNPC && attackerPlayer != null && attackerPlayer.IsNpc)
+                        return null;
+
+                    if (!_config.EnableProtectionAgainstAnimals && animalAttacker != null)
+                        return null;
+
+                    if (!_config.EnableProtectionAgainstHelicopter && heliAttacker != null)
+                        return null;
+
+                    if (attackerPlayer != null && !IsNPC(attackerPlayer))
+                    {
+                        TimeSpan remaining = victimProtectionEnd - DateTime.Now;
+                        MessagePlayer(attackerPlayer, Lang.PlayerProtected, FormatTime(remaining));
+                    }
+
+                    hitInfo.damageTypes.Clear();
+                    return true;
+                }
+                else
+                {
+                    _playerProtectionEndTimes.Remove(victim.userID);
+                }
+            }
+
+            if (attackerPlayer != null
+                && _config.ProtectedPlayersCannotHarmOthers
+                && _playerProtectionEndTimes.TryGetValue(attackerPlayer.userID, out DateTime attackerProtectionEnd)
+                && DateTime.Now < attackerProtectionEnd)
+            {
+                TimeSpan remaining = attackerProtectionEnd - DateTime.Now;
+                MessagePlayer(attackerPlayer, Lang.ProtectedCantAttackOthers, FormatTime(remaining));
+
+                hitInfo.damageTypes.Clear();
+                return true;
+            }
+
+            return null;
+        }
+
+        private object HandleDamageToOwnedEntity(BaseEntity entity, HitInfo hitInfo)
+        {
+            if (entity == null || hitInfo == null)
+                return null;
+
+            if (!_config.ProtectOwnedEntities)
+                return null;
+
+            BasePlayer owner = FindPlayerById(entity.OwnerID);
+            if (owner == null || IsNPC(owner))
+                return null;
+
+            BasePlayer attackerPlayer = hitInfo.InitiatorPlayer;
+            if (attackerPlayer == null || IsNPC(attackerPlayer))
+                return null;
+
+            if (_playerProtectionEndTimes.TryGetValue(owner.userID, out DateTime protectionEndTime))
+            {
+                if (DateTime.Now < protectionEndTime)
+                {
+                    TimeSpan remaining = protectionEndTime - DateTime.Now;
+                    MessagePlayer(attackerPlayer, Lang.OwnedEntityProtected, FormatTime(remaining));
+
+                    hitInfo.damageTypes.Clear();
+                    return true;
+                }
+                else
+                {
+                    _playerProtectionEndTimes.Remove(owner.userID);
+                }
+            }
+
+            return null;
+        }
+
+        #endregion Damage Handling
+
+        #region Sleeping Bag Detection
 
         private bool AnySleepingBagOrBedNearby(Vector3 position, float radius)
         {
@@ -308,9 +327,19 @@ namespace Oxide.Plugins
             return isNearSleepingBagOrBed;
         }
 
-        #endregion Sleeping Bag and Bed Detection
+        #endregion Sleeping Bag Detection
 
         #region Helper Functions
+
+        public static BasePlayer FindPlayerById(ulong playerId)
+        {
+            return RelationshipManager.FindByID(playerId);
+        }
+
+        public static bool IsNPC(BasePlayer player)
+        {
+            return player.IsNpc || !player.userID.IsSteamId();
+        }
 
         private string FormatTime(TimeSpan timeSpan)
         {
@@ -327,6 +356,88 @@ namespace Oxide.Plugins
         }
 
         #endregion Helper Functions
+
+        #region Helper Classes
+
+        public class DataFileUtil
+        {
+            private const string FOLDER = "";
+
+            public static void EnsureFolderCreated()
+            {
+                string path = Path.Combine(Interface.Oxide.DataDirectory, FOLDER);
+
+                if (!Directory.Exists(path))
+                    Directory.CreateDirectory(path);
+            }
+
+            public static string GetFilePath(string filename = null)
+            {
+                if (filename == null)
+                    filename = _plugin.Name;
+
+                return Path.Combine(FOLDER, filename);
+            }
+
+            public static string[] GetAllFilePaths(bool filenameOnly = false)
+            {
+                string[] filePaths = Interface.Oxide.DataFileSystem.GetFiles(FOLDER);
+
+                for (int i = 0; i < filePaths.Length; i++)
+                {
+                    filePaths[i] = filePaths[i].Substring(0, filePaths[i].Length - 5);
+
+                    if (filenameOnly)
+                    {
+                        filePaths[i] = Path.GetFileName(filePaths[i]);
+                    }
+                }
+                return filePaths;
+            }
+
+            public static bool Exists(string filePath)
+            {
+                return Interface.Oxide.DataFileSystem.ExistsDatafile(filePath);
+            }
+
+            public static T Load<T>(string filePath) where T : class, new()
+            {
+                T data = Interface.Oxide.DataFileSystem.ReadObject<T>(filePath);
+                if (data == null)
+                    data = new T();
+
+                return data;
+            }
+
+            public static T LoadIfExists<T>(string filePath) where T : class, new()
+            {
+                if (Exists(filePath))
+                    return Load<T>(filePath);
+                else
+                    return null;
+            }
+
+            public static T LoadOrCreate<T>(string filePath) where T : class, new()
+            {
+                T data = LoadIfExists<T>(filePath);
+                if (data == null)
+                    data = new T();
+
+                return data;
+            }
+
+            public static void Save<T>(string filePath, T data)
+            {
+                Interface.Oxide.DataFileSystem.WriteObject<T>(filePath, data);
+            }
+
+            public static void Delete(string filePath)
+            {
+                Interface.Oxide.DataFileSystem.DeleteDataFile(filePath);
+            }
+        }
+
+        #endregion Helper Classes
 
         #region Permissions
 
@@ -359,23 +470,34 @@ namespace Oxide.Plugins
         private class Lang
         {
             public const string PlayerProtected = "PlayerProtected ";
+            public const string OwnedEntityProtected = "OwnedEntityProtected";
+            public const string ProtectedCantAttackOthers = "ProtectedCantAttackOthers";
         }
 
         protected override void LoadDefaultMessages()
         {
             lang.RegisterMessages(new Dictionary<string, string>
             {
-                [Lang.PlayerProtected] = "The player you tried to attack is under spawn protection for {0}."
+                [Lang.PlayerProtected] = "The player you tried to attack is under spawn protection for {0}.",
+                [Lang.OwnedEntityProtected] = "You cannot damage this player's structures; they are spawn protected for {0}.",
+                [Lang.ProtectedCantAttackOthers] = "You cannot attack players while you are under spawn protection for {0}."
             }, this, "en");
         }
 
-        private void SendMessage(BasePlayer player, string messageKey, params object[] args)
+        private static string GetMessage(BasePlayer player, string messageKey, params object[] args)
         {
-            string message = lang.GetMessage(messageKey, this, player.UserIDString);
+            string message = _plugin.lang.GetMessage(messageKey, _plugin, player.UserIDString);
+
             if (args.Length > 0)
                 message = string.Format(message, args);
 
-            SendReply(player, message);
+            return message;
+        }
+
+        public static void MessagePlayer(BasePlayer player, string messageKey, params object[] args)
+        {
+            string message = GetMessage(player, messageKey, args);
+            _plugin.SendReply(player, message);
         }
 
         #endregion Localization
